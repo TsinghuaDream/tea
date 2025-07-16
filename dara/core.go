@@ -30,7 +30,10 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-type RuntimeOptions = util.RuntimeOptions
+type RuntimeOptions struct {
+	util.RuntimeOptions
+	Ctx context.Context
+}
 type ExtendsParameters = util.ExtendsParameters
 
 var debugLog = debug.Init("dara")
