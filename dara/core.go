@@ -34,6 +34,7 @@ type RuntimeOptions = util.RuntimeOptions
 type ExtendsParameters = util.ExtendsParameters
 
 var debugLog = debug.Init("dara")
+
 type HttpRequest interface {
 }
 
@@ -108,6 +109,7 @@ type RuntimeObject struct {
 	Logger            *utils.Logger          `json:"logger" xml:"logger"`
 	RetryOptions      *RetryOptions          `json:"retryOptions" xml:"retryOptions"`
 	ExtendsParameters *ExtendsParameters     `json:"extendsParameters,omitempty" xml:"extendsParameters,omitempty"`
+	Ctx               context.Context
 	HttpClient
 }
 
@@ -149,6 +151,9 @@ func NewRuntimeObject(runtime map[string]interface{}) *RuntimeObject {
 	}
 	if runtime["httpClient"] != nil {
 		runtimeObject.HttpClient = runtime["httpClient"].(HttpClient)
+	}
+	if runtime["ctx"] != nil {
+		runtimeObject.Ctx = runtime["ctx"].(context.Context)
 	}
 	if runtime["retryOptions"] != nil {
 		runtimeObject.RetryOptions = runtime["retryOptions"].(*RetryOptions)
@@ -223,6 +228,13 @@ func getDaraClient(tag string) *daraClient {
 
 // DoRequest is used send request to server
 func DoRequest(request *Request, runtimeObject *RuntimeObject) (response *Response, err error) {
+	if runtimeObject == nil || runtimeObject.Ctx == nil {
+		return DoRequestWithCtx(context.Background(), request, runtimeObject)
+	}
+	return DoRequestWithCtx(runtimeObject.Ctx, request, runtimeObject)
+}
+
+func DoRequestWithCtx(ctx context.Context, request *Request, runtimeObject *RuntimeObject) (response *Response, err error) {
 	if runtimeObject == nil {
 		runtimeObject = &RuntimeObject{}
 	}
@@ -265,7 +277,7 @@ func DoRequest(request *Request, runtimeObject *RuntimeObject) (response *Respon
 	}
 	debugLog("> %s %s", StringValue(request.Method), requestURL)
 
-	httpRequest, err := http.NewRequest(StringValue(request.Method), requestURL, request.Body)
+	httpRequest, err := http.NewRequestWithContext(ctx, StringValue(request.Method), requestURL, request.Body)
 	if err != nil {
 		return
 	}
@@ -320,6 +332,12 @@ func DoRequest(request *Request, runtimeObject *RuntimeObject) (response *Respon
 		completedBytes = runtimeObject.Tracker.CompletedBytes
 	}
 	if err != nil {
+		select {
+		case <-ctx.Done():
+			err = TeaSDKError(ctx.Err())
+		default:
+		}
+
 		event = utils.NewProgressEvent(utils.TransferFailedEvent, completedBytes, int64(contentlength), 0)
 		utils.PublishProgress(runtimeObject.Listener, event)
 		return

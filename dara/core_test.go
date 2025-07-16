@@ -362,7 +362,7 @@ type Test struct {
 
 func TestToMap(t *testing.T) {
 	inStr := map[string]string{
-		"tea": "test",
+		"tea":  "test",
 		"test": "test2",
 	}
 	result := ToMap(inStr)
@@ -370,7 +370,7 @@ func TestToMap(t *testing.T) {
 	utils.AssertEqual(t, "test2", result["test"])
 
 	inInt := map[string]int{
-		"tea": 12,
+		"tea":  12,
 		"test": 13,
 	}
 	result = ToMap(inInt)
@@ -514,6 +514,7 @@ func Test_GetBackoffTime(t *testing.T) {
 	ms = GetBackoffTime(backoff, Int(1))
 	utils.AssertEqual(t, true, IntValue(ms) <= 3)
 }
+
 type httpClient struct {
 	HttpClient
 	httpClient *http.Client
@@ -653,6 +654,50 @@ func Test_DoRequest(t *testing.T) {
 	utils.AssertEqual(t, `Internal error`, err.Error())
 }
 
+func Test_DoRequestWithContextCancellation(t *testing.T) {
+	// 保存原始的 hookDo
+	origTestHookDo := hookDo
+	defer func() { hookDo = origTestHookDo }()
+
+	// 创建带超时的上下文
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	// 用上下文封装hookDo，确保能够访问ctx
+	hookDo = func(fn func(req *http.Request, transport *http.Transport) (*http.Response, error)) func(req *http.Request, transport *http.Transport) (*http.Response, error) {
+		return func(req *http.Request, transport *http.Transport) (*http.Response, error) {
+			// 使用 select 检查上下文取消
+			select {
+			case <-time.After(2 * time.Second):
+				return &http.Response{StatusCode: 200, Header: http.Header{}, Body: http.NoBody}, nil
+			case <-ctx.Done(): // 检查上下文是否已经超时
+				return nil, ctx.Err() // 返回上下文超时的错误
+			}
+		}
+	}
+
+	// 创建请求
+	request := &Request{
+		Method:   String("GET"),
+		Protocol: String("http"),
+		Headers:  map[string]*string{"host": String("tea-cn-hangzhou.aliyuncs.com")},
+	}
+
+	// 创建运行时对象，并将上下文放入
+	runtimeObject := &RuntimeObject{
+		Ctx: ctx, // 使用上下文
+	}
+
+	resp, err := DoRequest(request, runtimeObject)
+
+	// 验证返回
+	utils.AssertNil(t, resp) // 确保响应为 nil
+	if err == nil {
+		t.Fatal("Expected an error due to context timeout, got nil")
+	}
+	utils.AssertContains(t, err.Error(), "context deadline exceeded") // 确保错误信息包含超时提示
+}
+
 func Test_DoRequestWithConcurrent(t *testing.T) {
 	origTestHookDo := hookDo
 	defer func() { hookDo = origTestHookDo }()
@@ -679,6 +724,53 @@ func Test_DoRequestWithConcurrent(t *testing.T) {
 				}()
 			}
 			wg.Done()
+		}(i)
+	}
+	wg.Wait()
+}
+
+func Test_DoRequestWithConcurrentAndContext(t *testing.T) {
+	origTestHookDo := hookDo
+	defer func() { hookDo = origTestHookDo }()
+	hookDo = func(fn func(req *http.Request, transport *http.Transport) (*http.Response, error)) func(req *http.Request, transport *http.Transport) (*http.Response, error) {
+		return func(req *http.Request, transport *http.Transport) (*http.Response, error) {
+			time.Sleep(100 * time.Millisecond) // 模拟请求延迟
+			return mockResponse(200, ``, nil)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(readTimeout int) {
+			defer wg.Done()
+
+			// 每个 goroutine 有自己的上下文，设定超时控制在 500 毫秒
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+
+			runtime := NewRuntimeObject(map[string]interface{}{
+				"readTimeout": readTimeout,
+				"ctx":         ctx, // 将上下文集成到运行时对象中
+			})
+
+			for j := 0; j < 50; j++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+
+					request := NewRequest()
+					resp, err := DoRequest(request, runtime)
+
+					if err != nil {
+						// 检查是否是由于上下文超时导致的错误
+						utils.AssertContains(t, err.Error(), "context deadline exceeded")
+					} else {
+						utils.AssertNil(t, err)
+						utils.AssertNotNil(t, resp)
+					}
+				}()
+			}
 		}(i)
 	}
 	wg.Wait()
